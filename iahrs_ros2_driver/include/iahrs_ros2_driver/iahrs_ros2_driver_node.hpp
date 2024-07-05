@@ -43,35 +43,21 @@ private:
   std::string frame_id_;
   bool publish_tf_;
   int sync_period_ms_;
-  bool sync_1ms_time_;
-  bool sync_temperature_;
   bool sync_sensor_accel_;
   bool sync_sensor_gyro_;
   bool sync_sensor_mag_;
-  bool sync_sensor_gravity_removed_accel_;
-  bool sync_sensor_euler_angle_;
   bool sync_sensor_quaternion_;
-  bool sync_sensor_global_velocity_;
-  bool sync_sensor_global_position_;
-  bool sync_sensor_vibration_;
   bool enable_filter_;
 
   inline bool is_sync_enabled_in_param(void) {
-    return sync_1ms_time_ | sync_temperature_ | sync_sensor_accel_ | sync_sensor_gyro_ | sync_sensor_mag_ | sync_sensor_gravity_removed_accel_ | sync_sensor_euler_angle_ | sync_sensor_quaternion_ | sync_sensor_global_velocity_ | sync_sensor_global_position_ | sync_sensor_vibration_;
+    return sync_sensor_accel_ | sync_sensor_gyro_ | sync_sensor_mag_ | sync_sensor_quaternion_;
   }
 
   inline iahrs_driver_sync_flag_t get_sync_flag_from_param(void) {
-    return (iahrs_driver_sync_flag_t)((sync_1ms_time_ ? IAHRS_DRIVER_SYNC_FLAG_1MS_TIME : 0) |
-                                      (sync_temperature_ ? IAHRS_DRIVER_SYNC_FLAG_TEMP : 0) |
-                                      (sync_sensor_accel_ ? IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL : 0) |
+    return (iahrs_driver_sync_flag_t)((sync_sensor_accel_ ? IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL : 0) |
                                       (sync_sensor_gyro_ ? IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO : 0) |
                                       (sync_sensor_mag_ ? IAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG : 0) |
-                                      (sync_sensor_gravity_removed_accel_ ? IAHRS_DRIVER_SYNC_FLAG_GRAVITY_REMOVED_ACCEL : 0) |
-                                      (sync_sensor_euler_angle_ ? IAHRS_DRIVER_SYNC_FLAG_EULER_ANGLE : 0) |
-                                      (sync_sensor_quaternion_ ? IAHRS_DRIVER_SYNC_FLAG_QUATERNION : 0) |
-                                      (sync_sensor_global_velocity_ ? IAHRS_DRIVER_SYNC_FLAG_GLOBAL_VELOCITY : 0) |
-                                      (sync_sensor_global_position_ ? IAHRS_DRIVER_SYNC_FLAG_GLOBAL_POSITION : 0) |
-                                      (sync_sensor_vibration_ ? IAHRS_DRIVER_SYNC_FLAG_VIBRATION : 0));
+                                      (sync_sensor_quaternion_ ? IAHRS_DRIVER_SYNC_FLAG_QUATERNION : 0));
   }
 
   void enable_sync_(iahrs_driver_sync_flag_t data_flag);

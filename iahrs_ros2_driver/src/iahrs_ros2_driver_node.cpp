@@ -3,7 +3,7 @@
 IAHRSDriverNode::IAHRSDriverNode(const std::string &node_name) : Node(node_name) {
   // -----------------------------------
   //  Get Params
-  RCLCPP_INFO(this->get_logger(), "iAHRS Driver from Mechasolution");
+  RCLCPP_INFO(this->get_logger(), "iAHRS Driver");
   RCLCPP_INFO(this->get_logger(), "Configuration:");
 
   this->declare_parameter("port", "/dev/ttyIMU");
@@ -22,14 +22,6 @@ IAHRSDriverNode::IAHRSDriverNode(const std::string &node_name) : Node(node_name)
   this->get_parameter("sync_period_ms", sync_period_ms_);
   RCLCPP_INFO(this->get_logger(), "\tsync_period_ms: %s", sync_period_ms_ ? "true" : "false");
 
-  this->declare_parameter("sync_1ms_time", false);
-  this->get_parameter("sync_1ms_time", sync_1ms_time_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_1ms_time: %s", sync_1ms_time_ ? "true" : "false");
-
-  this->declare_parameter("sync_temperature", false);
-  this->get_parameter("sync_temperature", sync_temperature_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_temperature: %s", sync_temperature_ ? "true" : "false");
-
   this->declare_parameter("sync_sensor_accel", false);
   this->get_parameter("sync_sensor_accel", sync_sensor_accel_);
   RCLCPP_INFO(this->get_logger(), "\tsync_sensor_accel: %s", sync_sensor_accel_ ? "true" : "false");
@@ -42,29 +34,9 @@ IAHRSDriverNode::IAHRSDriverNode(const std::string &node_name) : Node(node_name)
   this->get_parameter("sync_sensor_mag", sync_sensor_mag_);
   RCLCPP_INFO(this->get_logger(), "\tsync_sensor_mag: %s", sync_sensor_mag_ ? "true" : "false");
 
-  this->declare_parameter("sync_sensor_gravity_removed_accel", false);
-  this->get_parameter("sync_sensor_gravity_removed_accel", sync_sensor_gravity_removed_accel_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_gravity_removed_accel: %s", sync_sensor_gravity_removed_accel_ ? "true" : "false");
-
-  this->declare_parameter("sync_sensor_euler_angle", false);
-  this->get_parameter("sync_sensor_euler_angle", sync_sensor_euler_angle_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_euler_angle: %s", sync_sensor_euler_angle_ ? "true" : "false");
-
   this->declare_parameter("sync_sensor_quaternion", false);
   this->get_parameter("sync_sensor_quaternion", sync_sensor_quaternion_);
   RCLCPP_INFO(this->get_logger(), "\tsync_sensor_quaternion: %s", sync_sensor_quaternion_ ? "true" : "false");
-
-  this->declare_parameter("sync_sensor_global_velocity", false);
-  this->get_parameter("sync_sensor_global_velocity", sync_sensor_global_velocity_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_global_velocity: %s", sync_sensor_global_velocity_ ? "true" : "false");
-
-  this->declare_parameter("sync_sensor_global_position", false);
-  this->get_parameter("sync_sensor_global_position", sync_sensor_global_position_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_global_position: %s", sync_sensor_global_position_ ? "true" : "false");
-
-  this->declare_parameter("sync_sensor_vibration", false);
-  this->get_parameter("sync_sensor_vibration", sync_sensor_vibration_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_vibration: %s", sync_sensor_vibration_ ? "true" : "false");
 
   this->declare_parameter("enable_filter", false);
   this->get_parameter("enable_filter", enable_filter_);
@@ -135,28 +107,14 @@ IAHRSDriverNode::IAHRSDriverNode(const std::string &node_name) : Node(node_name)
 void IAHRSDriverNode::enable_sync_(iahrs_driver_sync_flag_t data_flag) {
   (void)data_flag;
   RCLCPP_INFO(this->get_logger(), "Enable sync: ");
-  if (sync_1ms_time_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_1MS_TIME");
-  if (sync_temperature_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_TEMP");
   if (sync_sensor_accel_)
     RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL");
   if (sync_sensor_gyro_)
     RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO");
   if (sync_sensor_mag_)
     RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG");
-  if (sync_sensor_gravity_removed_accel_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_GRAVITY_REMOVED_ACCEL");
-  if (sync_sensor_euler_angle_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_EULER_ANGLE");
   if (sync_sensor_quaternion_)
     RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_QUATERNION");
-  if (sync_sensor_global_velocity_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_GLOBAL_VELOCITY");
-  if (sync_sensor_global_position_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_GLOBAL_POSITION");
-  if (sync_sensor_vibration_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_VIBRATION");
 
   bool ret = imu_driver_.get()->set_sync(get_sync_flag_from_param(), (uint16_t)sync_period_ms_);
   if (ret == false) {
@@ -199,12 +157,6 @@ void IAHRSDriverNode::sync_data_callback_(void) {
     }
 
     switch (i) {
-      // case IAHRS_DRIVER_SYNC_FLAG_1MS_TIME:
-      //   break;
-
-      // case IAHRS_DRIVER_SYNC_FLAG_TEMP:
-      //   break;
-
     case IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL:
     case IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO:
     case IAHRS_DRIVER_SYNC_FLAG_QUATERNION:
@@ -233,21 +185,6 @@ void IAHRSDriverNode::sync_data_callback_(void) {
       mag_msg_.header.stamp = get_clock().get()->now();
       mag_publisher_.get()->publish(mag_msg_);
       break;
-
-      // case IAHRS_DRIVER_SYNC_FLAG_GRAVITY_REMOVED_ACCEL:
-      //   break;
-
-      // case IAHRS_DRIVER_SYNC_FLAG_EULER_ANGLE:
-      //   break;
-
-      // case IAHRS_DRIVER_SYNC_FLAG_GLOBAL_VELOCITY:
-      //   break;
-
-      // case IAHRS_DRIVER_SYNC_FLAG_GLOBAL_POSITION:
-      //   break;
-
-      // case IAHRS_DRIVER_SYNC_FLAG_VIBRATION:
-      //   break;
 
     default:
       break;
@@ -326,7 +263,7 @@ int main(int argc, char *argv[]) {
     node = std::make_shared<IAHRSDriverNode>("iahrs_driver_node");
     rclcpp::spin(node);
   } catch (const char *e) {
-    // std::cerr << "IAHRS Driver Node has been stopped due to: " << e << std::endl;
+    ;
   }
 
   // ROS2 종료

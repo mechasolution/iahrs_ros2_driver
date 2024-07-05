@@ -1,0 +1,22 @@
+/**:
+  ros__parameters:
+    port: "/dev/ttyUSB1"
+    frame_id: "imu_link" # TODO:
+    publish_tf: true
+
+    sync_period_ms: 10 # TODO:
+    # sync_1ms_time: false
+    # sync_temperature: false
+    sync_sensor_accel: true
+    sync_sensor_gyro: true
+    sync_sensor_mag: true
+    # sync_sensor_gravity_removed_accel: false
+    # sync_sensor_euler_angle: false
+    sync_sensor_quaternion: true
+    # sync_sensor_global_velocity: false
+    # sync_sensor_global_position: false
+    # sync_sensor_vibration: false
+
+    enable_filter: true
+
+    log_level: DEBUG

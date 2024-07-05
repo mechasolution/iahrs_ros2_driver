@@ -13,7 +13,9 @@
 
 IAHRSDriver::IAHRSDriver(const std::string &port) : serial_(port, 115200) {}
 
-IAHRSDriver::~IAHRSDriver() {}
+IAHRSDriver::~IAHRSDriver() {
+  reboot();
+}
 
 bool IAHRSDriver::send_obj_(const std::string &obj) {
   size_t ret = serial_.write(obj.c_str(), strlen(obj.c_str()) * sizeof(char));

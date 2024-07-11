@@ -49,6 +49,8 @@ bool IAHRSDriver::send_obj_(const std::string &obj, const std::string &data) {
     return false;
   }
 
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
   serial_.flush(); // 반환값 무시
 
   return true;

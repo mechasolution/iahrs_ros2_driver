@@ -160,13 +160,13 @@ void IAHRSDriverNode::sync_data_callback_(void) {
     case IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL:
     case IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO:
     case IAHRS_DRIVER_SYNC_FLAG_QUATERNION:
-      imu_msg_.linear_acceleration.x = data_buff.accel.x;
-      imu_msg_.linear_acceleration.y = data_buff.accel.y;
-      imu_msg_.linear_acceleration.z = data_buff.accel.z;
+      imu_msg_.linear_acceleration.x = data_buff.accel.x * 9.80665;
+      imu_msg_.linear_acceleration.y = data_buff.accel.y * 9.80665;
+      imu_msg_.linear_acceleration.z = data_buff.accel.z * 9.80665;
 
-      imu_msg_.angular_velocity.x = data_buff.gyro.x;
-      imu_msg_.angular_velocity.y = data_buff.gyro.y;
-      imu_msg_.angular_velocity.z = data_buff.gyro.z;
+      imu_msg_.angular_velocity.x = data_buff.gyro.x * (M_PI / 180.0);
+      imu_msg_.angular_velocity.y = data_buff.gyro.y * (M_PI / 180.0);
+      imu_msg_.angular_velocity.z = data_buff.gyro.z * (M_PI / 180.0);
 
       imu_msg_.orientation.x = data_buff.quaternion_angle.x;
       imu_msg_.orientation.y = data_buff.quaternion_angle.y;

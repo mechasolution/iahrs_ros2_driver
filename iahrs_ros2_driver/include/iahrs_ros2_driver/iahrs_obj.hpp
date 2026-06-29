@@ -49,7 +49,8 @@
 #define IAHRS_OBJ_SETW_PITCH_KALMAN_FILTER_VARIANCE "mv"         // 회전 Kalman filter의 방위 보정에 대한 분산 (0.001~1000, 0=disable)
 #define IAHRS_OBJ_SETW_ZERO_VELOCITY_KALMAN_FILTER_VARIANCE "zv" // 속도 Kalman filter의 영속도 보정에 대한 분산 (0.001~1000, 0=disable)
 
-typedef enum {
+typedef enum
+{
   IAHRS_DRIVER_SYNC_FLAG_NONE = 0x00,
 
   IAHRS_DRIVER_SYNC_FLAG_1MS_TIME = 0x0001,

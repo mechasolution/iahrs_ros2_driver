@@ -1,161 +1,229 @@
-#include <chrono>
-#include <cstdarg>
-#include <cstdio>
-#include <cstring>
-#include <fcntl.h>
-#include <iostream>
-#include <termios.h>
-#include <thread>
-#include <unistd.h>
-
 #include "iahrs_ros2_driver/serial.hpp"
 
-Serial::Serial(const std::string &port, unsigned int baud_rate)
-    : port_(port), baud_rate_(baud_rate), serial_fd_(-1) {}
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <fcntl.h>
+#include <poll.h>
+#include <termios.h>
+#include <unistd.h>
+#include <utility>
 
-Serial::~Serial() {
+namespace
+{
+
+speed_t to_termios_baud(unsigned int baud_rate)
+{
+  switch (baud_rate) {
+    case 9600:
+      return B9600;
+    case 19200:
+      return B19200;
+    case 38400:
+      return B38400;
+    case 57600:
+      return B57600;
+    case 115200:
+      return B115200;
+    default:
+      return 0;
+  }
+}
+
+}  // namespace
+
+Serial::Serial(std::string port, unsigned int baud_rate)
+: port_(std::move(port)), baud_rate_(baud_rate), serial_fd_(-1) {}
+
+Serial::~Serial()
+{
   close();
 }
 
-bool Serial::open() {
-  // std::cerr << "Try to open serial: " << port_ << std::endl;
+bool Serial::open()
+{
+  close();
 
-  serial_fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NDELAY);
-  if (serial_fd_ < 0) {
-    // std::cerr << "Error opening serial port: " << port_ << std::endl;
+  const speed_t speed = to_termios_baud(baud_rate_);
+  if (speed == 0) {
     return false;
   }
 
-  struct termios tio;
+  serial_fd_ = ::open(port_.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+  if (serial_fd_ < 0) {
+    return false;
+  }
+
+  termios tio{};
   if (tcgetattr(serial_fd_, &tio) < 0) {
-    // std::cerr << "Error tcgetattr() function return error" << std::endl;
     close();
     return false;
   }
 
   cfmakeraw(&tio);
-  tio.c_cflag = CS8 | CLOCAL | CREAD;
-  tio.c_iflag &= ~(IXON | IXOFF | IXANY);
-  tio.c_oflag &= ~OPOST;
-  tio.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-
-  cfsetspeed(&tio, baud_rate_);
-  tio.c_cc[VTIME] = 1;
+  tio.c_cflag |= CLOCAL | CREAD;
+  tio.c_cflag &= ~CSTOPB;
+  tio.c_cflag &= ~CRTSCTS;
+  tio.c_cflag &= ~CSIZE;
+  tio.c_cflag |= CS8;
+  tio.c_cc[VTIME] = 0;
   tio.c_cc[VMIN] = 0;
 
-  if (tcsetattr(serial_fd_, TCSANOW, &tio) != 0) {
-    // std::cerr << "Error tcsetattr() function return error" << std::endl;
+  if (cfsetispeed(&tio, speed) != 0 ||
+    cfsetospeed(&tio, speed) != 0 ||
+    tcsetattr(serial_fd_, TCSANOW, &tio) != 0)
+  {
     close();
     return false;
   }
 
-  // std::cerr << "Serial port opened successfully" << std::endl;
+  tcflush(serial_fd_, TCIOFLUSH);
+  receive_buffer_.clear();
+  discarding_line_ = false;
   return true;
 }
 
-void Serial::close() {
+void Serial::close()
+{
   if (serial_fd_ >= 0) {
     ::close(serial_fd_);
     serial_fd_ = -1;
-    // std::cerr << "Serial port closed" << std::endl;
   }
+  receive_buffer_.clear();
+  discarding_line_ = false;
 }
 
-void Serial::flush() {
+void Serial::flush()
+{
   if (serial_fd_ >= 0) {
-    tcflush(serial_fd_, TCIOFLUSH); // 입력 및 출력 버퍼 비우기
+    tcflush(serial_fd_, TCIOFLUSH);
   }
+  receive_buffer_.clear();
+  discarding_line_ = false;
 }
 
-int Serial::read(char *buffer, size_t size) {
-  if (serial_fd_ < 0 || buffer == nullptr) {
-    return -1;
-  }
-  return ::read(serial_fd_, buffer, size);
-}
-
-int Serial::write(const char *data, size_t size) {
+int Serial::write(const char *data, size_t size)
+{
   if (serial_fd_ < 0 || data == nullptr) {
-    return -1;
-  }
-  return ::write(serial_fd_, data, size);
-}
-
-int Serial::read_until(char *buffer, const char *until, int timeout_ms) {
-  if (serial_fd_ < 0 || buffer == nullptr || until == nullptr) {
     return SERIAL_READ_LINE_ERROR;
   }
 
-  int total_read = 0;
-  char *current = buffer;
-  int remaining_time = timeout_ms * 100;
-  const int sleep_interval_us = 10; // polling interval
-  int until_length = strlen(until);
-  int match_index = 0;
-
-  while (remaining_time >= 0) {
-    int bytes_read = ::read(serial_fd_, current, 1); // read one byte at a time
-
-    if (bytes_read > 0) {
-      if (*current == until[match_index]) {
-        match_index++;
-        if (match_index == until_length) {
-          // 'until' string found
-          *(current + 1) = '\0'; // null-terminate the string
-          return total_read + 1;
-        }
-      } else {
-        match_index = 0; // reset match index if not matching
-      }
-      current++;
-      total_read += bytes_read;
+  size_t total_written = 0;
+  while (total_written < size) {
+    const ssize_t written =
+      ::write(serial_fd_, data + total_written, size - total_written);
+    if (written > 0) {
+      total_written += static_cast<size_t>(written);
+      continue;
     }
-    // else if (bytes_read < 0) {
-    // read error
-    // return SERIAL_READ_LINE_ERROR;
-    // }
+    if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+      errno != EINTR)
+    {
+      return SERIAL_READ_LINE_ERROR;
+    }
 
-    // sleep for a short period to prevent busy waiting
-    std::this_thread::sleep_for(std::chrono::microseconds(sleep_interval_us));
-    remaining_time -= sleep_interval_us;
+    pollfd descriptor{serial_fd_, POLLOUT, 0};
+    const int poll_result = ::poll(&descriptor, 1, 100);
+    if (poll_result <= 0) {
+      return SERIAL_READ_LINE_ERROR;
+    }
   }
 
-  // timeout occurred
-  return SERIAL_READ_LINE_TIMEOUT;
+  return static_cast<int>(total_written);
 }
 
-int Serial::read_line(char *buffer, int timeout_ms) {
-  if (serial_fd_ < 0 || buffer == nullptr) {
+bool Serial::extract_line_(
+  std::string & output, const std::string & delimiter,
+  size_t max_line_size, int & result)
+{
+  if (discarding_line_) {
+    const size_t delimiter_position = receive_buffer_.find(delimiter);
+    if (delimiter_position == std::string::npos) {
+      receive_buffer_.clear();
+      return false;
+    }
+    receive_buffer_.erase(0, delimiter_position + delimiter.size());
+    discarding_line_ = false;
+  }
+
+  const size_t delimiter_position = receive_buffer_.find(delimiter);
+  if (delimiter_position == std::string::npos) {
+    if (receive_buffer_.size() > max_line_size) {
+      receive_buffer_.clear();
+      discarding_line_ = true;
+      result = SERIAL_READ_LINE_OVERFLOW;
+      return true;
+    }
+    return false;
+  }
+
+  const size_t line_size = delimiter_position + delimiter.size();
+  if (line_size > max_line_size) {
+    receive_buffer_.erase(0, line_size);
+    result = SERIAL_READ_LINE_OVERFLOW;
+    return true;
+  }
+
+  output.assign(receive_buffer_, 0, line_size);
+  receive_buffer_.erase(0, line_size);
+  result = static_cast<int>(line_size);
+  return true;
+}
+
+int Serial::read_until(
+  std::string & output, const std::string & delimiter, int timeout_ms,
+  size_t max_line_size)
+{
+  output.clear();
+  if (serial_fd_ < 0 || delimiter.empty() || timeout_ms < 0 ||
+    max_line_size == 0)
+  {
     return SERIAL_READ_LINE_ERROR;
   }
 
-  int total_read = 0;
-  char *current = buffer;
-  int remaining_time = timeout_ms;
-  const int sleep_interval_ms = 10; // polling interval
-
-  while (remaining_time > 0) {
-    int bytes_read = ::read(serial_fd_, current, 1); // read one byte at a time
-
-    if (bytes_read > 0) {
-      if (*current == '\n') {
-        // newline character found
-        *(current + 1) = '\0'; // null-terminate the string
-        return total_read + 1;
-      }
-      current++;
-      total_read += bytes_read;
-    }
-    // else if (bytes_read < 0) {
-    // read error
-    // return SERIAL_READ_LINE_ERROR;
-    // }
-
-    // sleep for a short period to prevent busy waiting
-    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_interval_ms));
-    remaining_time -= sleep_interval_ms;
+  int result = SERIAL_READ_LINE_NO_DATA;
+  if (extract_line_(output, delimiter, max_line_size, result)) {
+    return result;
   }
 
-  // timeout occurred
-  return SERIAL_READ_LINE_TIMEOUT;
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+  while (true) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) {
+      return SERIAL_READ_LINE_TIMEOUT;
+    }
+
+    const auto remaining =
+      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+    const int poll_timeout = std::max(1, static_cast<int>(remaining.count()));
+    pollfd descriptor{serial_fd_, POLLIN, 0};
+    const int poll_result = ::poll(&descriptor, 1, poll_timeout);
+    if (poll_result == 0) {
+      return SERIAL_READ_LINE_TIMEOUT;
+    }
+    if (poll_result < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return SERIAL_READ_LINE_ERROR;
+    }
+    if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+      return SERIAL_READ_LINE_ERROR;
+    }
+
+    char buffer[256];
+    const ssize_t bytes_read = ::read(serial_fd_, buffer, sizeof(buffer));
+    if (bytes_read > 0) {
+      receive_buffer_.append(buffer, static_cast<size_t>(bytes_read));
+      if (extract_line_(output, delimiter, max_line_size, result)) {
+        return result;
+      }
+    } else if (
+      bytes_read < 0 && errno != EAGAIN && errno != EWOULDBLOCK &&
+      errno != EINTR)
+    {
+      return SERIAL_READ_LINE_ERROR;
+    }
+  }
 }

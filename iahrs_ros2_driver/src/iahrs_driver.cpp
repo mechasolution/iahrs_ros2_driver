@@ -1,243 +1,305 @@
-#include <chrono>
-#include <iostream>
-#include <stdarg.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <string.h>
-#include <thread>
-#include <unistd.h>
-
 #include "iahrs_ros2_driver/iahrs_driver.hpp"
 
-#define END_DATA "\r\n\x00"
+#include <cerrno>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <limits>
+#include <sstream>
+#include <thread>
+#include <vector>
 
-IAHRSDriver::IAHRSDriver(const std::string &port) : serial_(port, 115200) {}
+namespace
+{
 
-IAHRSDriver::~IAHRSDriver() {
-  reboot();
-}
+constexpr char END_DATA[] = "\r\n";
+constexpr auto COMMAND_DELAY = std::chrono::milliseconds(100);
 
-bool IAHRSDriver::send_obj_(const std::string &obj) {
-  size_t ret = serial_.write(obj.c_str(), strlen(obj.c_str()) * sizeof(char));
-  ret += serial_.write("\n", 1);
-
-  if (ret != strlen(obj.c_str()) + 1) {
-    std::cerr << "Failed to send." << std::endl;
+bool parse_double(const std::string & token, double & value)
+{
+  if (token.empty()) {
     return false;
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  char *end = nullptr;
+  errno = 0;
+  const double parsed = std::strtod(token.c_str(), &end);
+  if (end == token.c_str() || errno == ERANGE || !std::isfinite(parsed)) {
+    return false;
+  }
+  while (*end == ' ' || *end == '\t') {
+    ++end;
+  }
+  if (*end != '\0') {
+    return false;
+  }
 
-  serial_.flush(); // 반환값 무시
-
+  value = parsed;
   return true;
 }
 
-bool IAHRSDriver::send_obj_(const std::string &obj, const std::string &data) {
-  size_t ret = serial_.write(obj.c_str(), strlen(obj.c_str()) * sizeof(char));
-  ret += serial_.write("=", 1);
-  ret += serial_.write(data.c_str(), strlen(data.c_str()) * sizeof(char));
-  ret += serial_.write("\n", 1);
-
-  if (ret != strlen(obj.c_str()) + strlen(data.c_str()) + 2) {
-    std::cerr << "Failed to send." << std::endl;
+bool parse_uint64(const std::string & token, uint64_t & value)
+{
+  if (token.empty() || token.front() == '-') {
     return false;
   }
 
-  ret = serial_.read_until(buff_, END_DATA, 500);
-  if (ret <= 0) {
+  char *end = nullptr;
+  errno = 0;
+  const unsigned long long parsed = std::strtoull(token.c_str(), &end, 10);
+  if (end == token.c_str() || errno == ERANGE) {
+    return false;
+  }
+  while (*end == ' ' || *end == '\t') {
+    ++end;
+  }
+  if (*end != '\0' ||
+    parsed > std::numeric_limits<uint64_t>::max())
+  {
     return false;
   }
 
-  std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-  serial_.flush(); // 반환값 무시
-
+  value = static_cast<uint64_t>(parsed);
   return true;
 }
 
-uint64_t IAHRSDriver::parse_sync_data_and_shift_buffer_uint64_(char *&buff) {
-  uint64_t value;
-  int offset = 0;
-
-  sscanf(buff, "%lu,%n", &value, &offset);
-  buff += offset;
-
-  return value;
-}
-
-double IAHRSDriver::parse_sync_data_and_shift_buffer_double_(char *&buff) {
-  double value;
-  int offset = 0;
-
-  sscanf(buff, "%lf,%n", &value, &offset);
-  buff += offset;
-
-  return value;
-}
-
-bool IAHRSDriver::initialize() {
-  if (!serial_.open()) {
-    return false;
+std::vector<std::string> split_fields(std::string line)
+{
+  while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) {
+    line.pop_back();
+  }
+  if (!line.empty() && line.back() == ',') {
+    line.pop_back();
   }
 
-  return true;
+  std::vector<std::string> fields;
+  std::stringstream stream(line);
+  std::string field;
+  while (std::getline(stream, field, ',')) {
+    fields.push_back(field);
+  }
+  return fields;
 }
 
-bool IAHRSDriver::reboot() {
+}  // namespace
+
+IAHRSDriver::IAHRSDriver(const std::string & port)
+: serial_(port, 115200) {}
+
+bool IAHRSDriver::write_command_(const std::string & command)
+{
+  const std::string wire_command = command + '\n';
+  return serial_.write(wire_command.data(), wire_command.size()) ==
+         static_cast<int>(wire_command.size());
+}
+
+bool IAHRSDriver::send_obj_(const std::string & obj)
+{
+  if (!write_command_(obj)) {
+    return false;
+  }
+  std::this_thread::sleep_for(COMMAND_DELAY);
   serial_.flush();
-  int ret = send_obj_(IAHRS_OBJ_SET_SENSOR_RESTART);
-  if (ret == false) {
+  return true;
+}
+
+bool IAHRSDriver::send_obj_(
+  const std::string & obj, const std::string & data)
+{
+  if (!write_command_(obj + "=" + data)) {
     return false;
   }
 
-  char *temp_ptr;
-  for (int i = 0; i < 4; i++) {
-    ret = serial_.read_until(buff_, END_DATA, 500);
-    if (ret < 1) {
-      report_read_error(ret);
+  std::string response;
+  const int result =
+    serial_.read_until(response, END_DATA, 500, MAX_RESPONSE_SIZE);
+  if (result <= 0) {
+    return false;
+  }
+
+  std::this_thread::sleep_for(COMMAND_DELAY);
+  serial_.flush();
+  return true;
+}
+
+bool IAHRSDriver::initialize()
+{
+  return serial_.open();
+}
+
+bool IAHRSDriver::reboot()
+{
+  serial_.flush();
+  if (!send_obj_(IAHRS_OBJ_SET_SENSOR_RESTART)) {
+    return false;
+  }
+
+  std::string response;
+  for (int index = 0; index < 4; ++index) {
+    const int result =
+      serial_.read_until(response, END_DATA, 500, MAX_RESPONSE_SIZE);
+    if (result <= 0) {
       return false;
     }
 
-    switch (i) {
-    case 1:
-      if (strcmp(buff_, "iAHRS" END_DATA) != 0) {
+    if (index == 1 && response != std::string("iAHRS") + END_DATA) {
+      return false;
+    }
+
+    const std::string software_prefix = "S/W ver: ";
+    const std::string hardware_prefix = "H/W ver: ";
+    if (index == 2) {
+      if (response.rfind(software_prefix, 0) != 0 ||
+        std::sscanf(
+              response.c_str() + software_prefix.size(), "%d.%d",
+              &version_.sw.major, &version_.sw.minor) != 2)
+      {
         return false;
       }
-      break;
-
-    case 2:
-      temp_ptr = move_ptr_until_end_(buff_, "S/W ver: ");
-      if (temp_ptr == nullptr) {
+    } else if (index == 3) {
+      if (response.rfind(hardware_prefix, 0) != 0 ||
+        std::sscanf(
+              response.c_str() + hardware_prefix.size(), "%d.%d",
+              &version_.hw.major, &version_.hw.minor) != 2)
+      {
         return false;
       }
-      sscanf(temp_ptr, "%d.%d", &version_.sw.major, &version_.sw.minor);
-      break;
-
-    case 3:
-      temp_ptr = move_ptr_until_end_(buff_, "H/W ver: ");
-      if (temp_ptr == nullptr) {
-        return false;
-      }
-      sscanf(temp_ptr, "%d.%d", &version_.hw.major, &version_.hw.minor);
-      break;
-
-    case 0:
-    default:
-      break;
     }
   }
   return true;
 }
 
-bool IAHRSDriver::set_sync(uint16_t target_mask, uint16_t period_ms) {
-  if (target_mask >= IAHRS_DRIVER_SYNC_FLAG_MAX) {
+bool IAHRSDriver::set_sync(uint16_t target_mask, uint16_t period_ms)
+{
+  if (target_mask >= IAHRS_DRIVER_SYNC_FLAG_MAX ||
+    period_ms == 0 || period_ms > 60000)
+  {
     return false;
   }
+
+  std::ostringstream mask_stream;
+  mask_stream << "0x" << std::hex << target_mask;
+  if (!send_obj_(IAHRS_OBJ_SETW_SYNC_DATA_MODE, "1") ||
+    !send_obj_(
+          IAHRS_OBJ_SETW_SYNC_DATA_PERIOD, std::to_string(period_ms)) ||
+    !send_obj_(IAHRS_OBJ_SETW_SYNC_DATA_TYPE, mask_stream.str()))
+  {
+    return false;
+  }
+
   sync_mask_ = target_mask;
-  bool ret = true;
-
-  ret &= send_obj_(IAHRS_OBJ_SETW_SYNC_DATA_MODE, "1");
-  sprintf(buff_, "%d", period_ms);
-  ret &= send_obj_(IAHRS_OBJ_SETW_SYNC_DATA_PERIOD, buff_);
-  sprintf(buff_, "0x%x", target_mask);
-  ret &= send_obj_(IAHRS_OBJ_SETW_SYNC_DATA_TYPE, buff_);
-
-  return ret;
+  return true;
 }
 
-bool IAHRSDriver::set_option(bool state) {
+bool IAHRSDriver::set_option(bool state)
+{
   return send_obj_(IAHRS_OBJ_SETW_OPTION, state ? "1" : "0");
 }
 
-bool IAHRSDriver::reset_euler_angle(void) {
+bool IAHRSDriver::reset_euler_angle()
+{
   return send_obj_(IAHRS_OBJ_SET_RESET_EULER_ANGLE);
 }
 
-bool IAHRSDriver::fetch_sync_data(iahrs_driver_sync_data_t &data_buff) {
-  int ret;
-
-  ret = serial_.read_until(buff_, END_DATA, 100);
-  if (ret <= 0) {
+bool IAHRSDriver::fetch_sync_data(
+  iahrs_driver_sync_data_t & data, int timeout_ms)
+{
+  std::string line;
+  const int result =
+    serial_.read_until(line, END_DATA, timeout_ms, MAX_RESPONSE_SIZE);
+  if (result <= 0) {
     return false;
   }
-  char *buff_temp_ptr = buff_;
-  for (iahrs_driver_sync_flag_t i = static_cast<iahrs_driver_sync_flag_t>(IAHRS_DRIVER_SYNC_FLAG_NONE + 1);
-       i < IAHRS_DRIVER_SYNC_FLAG_MAX;
-       i = static_cast<iahrs_driver_sync_flag_t>(i << 1)) {
+  return parse_sync_data(line, sync_mask_, data);
+}
 
-    if ((sync_mask_ & i) != i) {
+bool IAHRSDriver::parse_sync_data(
+  const std::string & line, uint16_t sync_mask,
+  iahrs_driver_sync_data_t & data)
+{
+  if (sync_mask == IAHRS_DRIVER_SYNC_FLAG_NONE ||
+    sync_mask >= IAHRS_DRIVER_SYNC_FLAG_MAX)
+  {
+    return false;
+  }
+
+  const std::vector<std::string> fields = split_fields(line);
+  size_t field_index = 0;
+  iahrs_driver_sync_data_t parsed{};
+
+  const auto next_double = [&](double & value) {
+      return field_index < fields.size() &&
+             parse_double(fields[field_index++], value);
+    };
+  const auto next_uint64 = [&](uint64_t & value) {
+      return field_index < fields.size() &&
+             parse_uint64(fields[field_index++], value);
+    };
+  const auto next_axis = [&](axis_data_t & axis) {
+      return next_double(axis.x) &&
+             next_double(axis.y) &&
+             next_double(axis.z);
+    };
+
+  for (uint16_t flag = IAHRS_DRIVER_SYNC_FLAG_1MS_TIME;
+    flag < IAHRS_DRIVER_SYNC_FLAG_MAX; flag <<= 1)
+  {
+    if ((sync_mask & flag) == 0) {
       continue;
     }
 
-    switch (i) {
-    case IAHRS_DRIVER_SYNC_FLAG_1MS_TIME:
-      data_buff.one_ms_time = parse_sync_data_and_shift_buffer_uint64_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_TEMP:
-      data_buff.temperature = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL:
-      data_buff.accel.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.accel.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.accel.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO:
-      data_buff.gyro.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.gyro.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.gyro.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG:
-      data_buff.mag.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.mag.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.mag.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_GRAVITY_REMOVED_ACCEL:
-      data_buff.accel_gravity_removed.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.accel_gravity_removed.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.accel_gravity_removed.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_EULER_ANGLE:
-      data_buff.euler_angle.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.euler_angle.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.euler_angle.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_QUATERNION:
-      data_buff.quaternion_angle.w = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr); // r
-      data_buff.quaternion_angle.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr); // v0
-      data_buff.quaternion_angle.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr); // v1
-      data_buff.quaternion_angle.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr); // v2
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_GLOBAL_VELOCITY:
-      data_buff.velocity.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.velocity.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.velocity.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_GLOBAL_POSITION:
-      data_buff.position.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.position.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.position.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_VIBRATION:
-      data_buff.vibration.x = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.vibration.y = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      data_buff.vibration.z = parse_sync_data_and_shift_buffer_double_(buff_temp_ptr);
-      break;
-
-    default:
+    bool valid = false;
+    switch (flag) {
+      case IAHRS_DRIVER_SYNC_FLAG_1MS_TIME:
+        valid = next_uint64(parsed.one_ms_time);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_TEMP:
+        valid = next_double(parsed.temperature);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL:
+        valid = next_axis(parsed.accel);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO:
+        valid = next_axis(parsed.gyro);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG:
+        valid = next_axis(parsed.mag);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_GRAVITY_REMOVED_ACCEL:
+        valid = next_axis(parsed.accel_gravity_removed);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_EULER_ANGLE:
+        valid = next_axis(parsed.euler_angle);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_QUATERNION:
+        valid =
+          next_double(parsed.quaternion_angle.w) &&
+          next_double(parsed.quaternion_angle.x) &&
+          next_double(parsed.quaternion_angle.y) &&
+          next_double(parsed.quaternion_angle.z);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_GLOBAL_VELOCITY:
+        valid = next_axis(parsed.velocity);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_GLOBAL_POSITION:
+        valid = next_axis(parsed.position);
+        break;
+      case IAHRS_DRIVER_SYNC_FLAG_VIBRATION:
+        valid = next_axis(parsed.vibration);
+        break;
+      default:
+        return false;
+    }
+    if (!valid) {
       return false;
     }
   }
 
+  if (field_index != fields.size()) {
+    return false;
+  }
+
+  data = parsed;
   return true;
 }

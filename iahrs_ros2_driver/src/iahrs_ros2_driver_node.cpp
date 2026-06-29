@@ -1,272 +1,342 @@
 #include "iahrs_ros2_driver/iahrs_ros2_driver_node.hpp"
 
-IAHRSDriverNode::IAHRSDriverNode(const std::string &node_name) : Node(node_name) {
-  // -----------------------------------
-  //  Get Params
-  RCLCPP_INFO(this->get_logger(), "iAHRS Driver");
-  RCLCPP_INFO(this->get_logger(), "Configuration:");
+#include <algorithm>
+#include <cmath>
+#include <memory>
+#include <stdexcept>
 
-  this->declare_parameter("port", "/dev/ttyIMU");
-  this->get_parameter("port", port_);
-  RCLCPP_INFO(this->get_logger(), "\tport: \"%s\"", port_.c_str());
+namespace
+{
 
-  this->declare_parameter("frame_id", "imu_link");
-  this->get_parameter("frame_id", frame_id_);
-  RCLCPP_INFO(this->get_logger(), "\tframe_id: \"%s\"", frame_id_.c_str());
+constexpr double STANDARD_GRAVITY = 9.80665;
+constexpr double DEGREES_TO_RADIANS = 0.017453292519943295;
+constexpr double MICROTESLA_TO_TESLA = 1.0e-6;
+constexpr double MAX_QUATERNION_NORM_ERROR = 0.1;
 
-  this->declare_parameter("publish_tf", false);
-  this->get_parameter("publish_tf", publish_tf_);
-  RCLCPP_INFO(this->get_logger(), "\tpublish_tf: %s", publish_tf_ ? "true" : "false");
+bool normalize_quaternion(orientation_data_t & quaternion)
+{
+  const double squared_norm =
+    quaternion.x * quaternion.x +
+    quaternion.y * quaternion.y +
+    quaternion.z * quaternion.z +
+    quaternion.w * quaternion.w;
+  if (!std::isfinite(squared_norm)) {
+    return false;
+  }
 
-  this->declare_parameter("sync_period_ms", 1000);
-  this->get_parameter("sync_period_ms", sync_period_ms_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_period_ms: %s", sync_period_ms_ ? "true" : "false");
+  const double norm = std::sqrt(squared_norm);
+  if (std::abs(norm - 1.0) > MAX_QUATERNION_NORM_ERROR) {
+    return false;
+  }
+  quaternion.x /= norm;
+  quaternion.y /= norm;
+  quaternion.z /= norm;
+  quaternion.w /= norm;
+  return true;
+}
 
-  this->declare_parameter("sync_sensor_accel", false);
-  this->get_parameter("sync_sensor_accel", sync_sensor_accel_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_accel: %s", sync_sensor_accel_ ? "true" : "false");
+}  // namespace
 
-  this->declare_parameter("sync_sensor_gyro", false);
-  this->get_parameter("sync_sensor_gyro", sync_sensor_gyro_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_gyro: %s", sync_sensor_gyro_ ? "true" : "false");
+IAHRSDriverNode::IAHRSDriverNode(const std::string & node_name)
+: Node(node_name)
+{
+  RCLCPP_INFO(get_logger(), "iAHRS Driver");
 
-  this->declare_parameter("sync_sensor_mag", false);
-  this->get_parameter("sync_sensor_mag", sync_sensor_mag_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_mag: %s", sync_sensor_mag_ ? "true" : "false");
+  port_ = declare_parameter<std::string>("port", "/dev/ttyIMU");
+  frame_id_ = declare_parameter<std::string>("frame_id", "imu_link");
+  parent_frame_id_ =
+    declare_parameter<std::string>("parent_frame_id", "base_link");
+  publish_tf_ = declare_parameter<bool>("publish_tf", false);
+  sync_period_ms_ = declare_parameter<int>("sync_period_ms", 1000);
+  sync_sensor_accel_ =
+    declare_parameter<bool>("sync_sensor_accel", false);
+  sync_sensor_gyro_ =
+    declare_parameter<bool>("sync_sensor_gyro", false);
+  sync_sensor_mag_ =
+    declare_parameter<bool>("sync_sensor_mag", false);
+  sync_sensor_quaternion_ =
+    declare_parameter<bool>("sync_sensor_quaternion", false);
+  enable_filter_ = declare_parameter<bool>("enable_filter", false);
 
-  this->declare_parameter("sync_sensor_quaternion", false);
-  this->get_parameter("sync_sensor_quaternion", sync_sensor_quaternion_);
-  RCLCPP_INFO(this->get_logger(), "\tsync_sensor_quaternion: %s", sync_sensor_quaternion_ ? "true" : "false");
+  if (sync_period_ms_ < 1 || sync_period_ms_ > 60000) {
+    throw std::invalid_argument("sync_period_ms must be between 1 and 60000");
+  }
+  if (frame_id_.empty() || parent_frame_id_.empty()) {
+    throw std::invalid_argument("frame IDs must not be empty");
+  }
 
-  this->declare_parameter("enable_filter", false);
-  this->get_parameter("enable_filter", enable_filter_);
-  RCLCPP_INFO(this->get_logger(), "\tenable_filter: %s", enable_filter_ ? "true" : "false");
+  RCLCPP_INFO(get_logger(), "Configuration:");
+  RCLCPP_INFO(get_logger(), "\tport: \"%s\"", port_.c_str());
+  RCLCPP_INFO(get_logger(), "\tframe_id: \"%s\"", frame_id_.c_str());
+  RCLCPP_INFO(
+      get_logger(), "\tparent_frame_id: \"%s\"", parent_frame_id_.c_str());
+  RCLCPP_INFO(
+      get_logger(), "\tpublish_tf: %s", publish_tf_ ? "true" : "false");
+  RCLCPP_INFO(get_logger(), "\tsync_period_ms: %d", sync_period_ms_);
+  RCLCPP_INFO(
+      get_logger(), "\tsync_sensor_accel: %s",
+      sync_sensor_accel_ ? "true" : "false");
+  RCLCPP_INFO(
+      get_logger(), "\tsync_sensor_gyro: %s",
+      sync_sensor_gyro_ ? "true" : "false");
+  RCLCPP_INFO(
+      get_logger(), "\tsync_sensor_mag: %s",
+      sync_sensor_mag_ ? "true" : "false");
+  RCLCPP_INFO(
+      get_logger(), "\tsync_sensor_quaternion: %s",
+      sync_sensor_quaternion_ ? "true" : "false");
+  RCLCPP_INFO(
+      get_logger(), "\tenable_filter: %s",
+      enable_filter_ ? "true" : "false");
 
-  // -----------------------------------
-  //  iAHRS Init
   imu_driver_ = std::make_unique<IAHRSDriver>(port_);
-  bool ret = imu_driver_.get()->initialize();
-  if (ret != true) {
-    stop_node_("Failed to connect IMU port");
+  if (!imu_driver_->initialize()) {
+    throw std::runtime_error("Failed to connect IMU port");
   }
-  ret = imu_driver_.get()->reboot();
-  if (ret != true) {
-    stop_node_("Failed to init IMU");
+  if (!imu_driver_->reboot()) {
+    throw std::runtime_error("Failed to initialize IMU");
   }
 
-  RCLCPP_INFO(this->get_logger(), "iAHRS Version:");
-  RCLCPP_INFO(this->get_logger(),
-              "\tH/W Version: %d.%d",
-              imu_driver_.get()->get_version().hw.major, imu_driver_.get()->get_version().hw.minor);
-  RCLCPP_INFO(this->get_logger(),
-              "\tS/W Version: %d.%d",
-              imu_driver_.get()->get_version().sw.major, imu_driver_.get()->get_version().sw.minor);
+  const auto & version = imu_driver_->get_version();
+  RCLCPP_INFO(
+      get_logger(), "iAHRS H/W Version: %d.%d",
+      version.hw.major, version.hw.minor);
+  RCLCPP_INFO(
+      get_logger(), "iAHRS S/W Version: %d.%d",
+      version.sw.major, version.sw.minor);
 
-  ret = imu_driver_.get()->set_option(enable_filter_);
-  if (ret != true) {
-    stop_node_("Failed to init IMU");
+  if (!imu_driver_->set_option(enable_filter_)) {
+    throw std::runtime_error("Failed to configure IMU filter");
   }
 
-  if (is_sync_enabled_in_param()) {
-    enable_sync_(get_sync_flag_from_param());
-    sync_flag_ = imu_driver_.get()->get_sync_flag();
-  }
-
-  // -----------------------------------
-  //  ROS Init
-  auto qos = rclcpp::QoS(rclcpp::SensorDataQoS());
-
+  const auto qos = rclcpp::SensorDataQoS();
   imu_msg_.header.frame_id = frame_id_;
   mag_msg_.header.frame_id = frame_id_;
-  imu_publisher_ = this->create_publisher<sensor_msgs::msg::Imu>("imu/data", qos);
-  mag_publisher_ = this->create_publisher<sensor_msgs::msg::MagneticField>("imu/mag", qos);
+  configure_covariances_();
+  imu_publisher_ =
+    create_publisher<sensor_msgs::msg::Imu>("imu/data", qos);
+  mag_publisher_ =
+    create_publisher<sensor_msgs::msg::MagneticField>("imu/mag", qos);
 
   restart_service_ =
-      this->create_service<iahrs_ros2_driver_msgs::srv::Restart>(
+    create_service<iahrs_ros2_driver_msgs::srv::Restart>(
           "imu/restart",
-          [this](const std::shared_ptr<iahrs_ros2_driver_msgs::srv::Restart::Request> request,
-                 std::shared_ptr<iahrs_ros2_driver_msgs::srv::Restart::Response> response) {
-            this->restart_service_callback_(request, response);
+    [this](
+      const std::shared_ptr<
+        iahrs_ros2_driver_msgs::srv::Restart::Request> request,
+      std::shared_ptr<
+        iahrs_ros2_driver_msgs::srv::Restart::Response> response) {
+      restart_service_callback_(request, response);
           });
 
   reset_orientation_service_ =
-      this->create_service<iahrs_ros2_driver_msgs::srv::ResetOrientation>(
+    create_service<iahrs_ros2_driver_msgs::srv::ResetOrientation>(
           "imu/reset_heading",
-          [this](const std::shared_ptr<iahrs_ros2_driver_msgs::srv::ResetOrientation::Request> request,
-                 std::shared_ptr<iahrs_ros2_driver_msgs::srv::ResetOrientation::Response> response) {
-            this->reset_orientation_service_callback_(request, response);
+    [this](
+      const std::shared_ptr<
+        iahrs_ros2_driver_msgs::srv::ResetOrientation::Request>
+      request,
+      std::shared_ptr<
+        iahrs_ros2_driver_msgs::srv::ResetOrientation::Response>
+      response) {
+      reset_orientation_service_callback_(request, response);
           });
 
+  if (is_sync_enabled_in_param()) {
+    configure_sync_();
+  } else {
+    RCLCPP_WARN(get_logger(), "No synchronized sensor data is enabled");
+  }
   if (publish_tf_) {
-    enable_tf_publish_();
+    publish_static_tf_();
   }
 
-  RCLCPP_INFO(this->get_logger(), "iAHRS Driver Node has been started.");
+  RCLCPP_INFO(get_logger(), "iAHRS Driver Node has started");
 }
 
-void IAHRSDriverNode::enable_sync_(iahrs_driver_sync_flag_t data_flag) {
-  (void)data_flag;
-  RCLCPP_INFO(this->get_logger(), "Enable sync: ");
-  if (sync_sensor_accel_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL");
-  if (sync_sensor_gyro_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO");
-  if (sync_sensor_mag_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG");
-  if (sync_sensor_quaternion_)
-    RCLCPP_INFO(this->get_logger(), "\tIAHRS_DRIVER_SYNC_FLAG_QUATERNION");
+bool IAHRSDriverNode::is_sync_enabled_in_param() const
+{
+  return is_imu_enabled() || sync_sensor_mag_;
+}
 
-  bool ret = imu_driver_.get()->set_sync(get_sync_flag_from_param(), (uint16_t)sync_period_ms_);
-  if (ret == false) {
-    stop_node_("Failed to start sync");
+bool IAHRSDriverNode::is_imu_enabled() const
+{
+  return sync_sensor_accel_ ||
+         sync_sensor_gyro_ ||
+         sync_sensor_quaternion_;
+}
+
+iahrs_driver_sync_flag_t
+IAHRSDriverNode::get_sync_flag_from_param() const
+{
+  uint16_t mask = IAHRS_DRIVER_SYNC_FLAG_NONE;
+  if (sync_sensor_accel_) {
+    mask |= IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL;
+  }
+  if (sync_sensor_gyro_) {
+    mask |= IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO;
+  }
+  if (sync_sensor_mag_) {
+    mask |= IAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG;
+  }
+  if (sync_sensor_quaternion_) {
+    mask |= IAHRS_DRIVER_SYNC_FLAG_QUATERNION;
+  }
+  return static_cast<iahrs_driver_sync_flag_t>(mask);
+}
+
+void IAHRSDriverNode::configure_sync_()
+{
+  const auto mask = get_sync_flag_from_param();
+  if (!imu_driver_->set_sync(mask, static_cast<uint16_t>(sync_period_ms_))) {
+    throw std::runtime_error("Failed to start synchronized IMU data");
   }
 
-  if (sync_data_timer_ == nullptr || sync_data_timer_.get()->is_canceled() == true) {
-    sync_data_timer_ = this->create_wall_timer(
-        std::chrono::microseconds(500),
-        [this]() {
-          this->sync_data_callback_();
-        });
+  if (!sync_data_timer_) {
+    const int polling_period_ms =
+      std::max(1, std::min(sync_period_ms_, 10));
+    sync_data_timer_ = create_wall_timer(
+        std::chrono::milliseconds(polling_period_ms),
+      [this]() {sync_data_callback_();});
   }
 }
 
-void IAHRSDriverNode::enable_tf_publish_(void) {
-  tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
-  tf_timer_ = this->create_wall_timer(
-      std::chrono::milliseconds(100),
-      [this]() {
-        this->tf_publish_callback_();
-      });
+void IAHRSDriverNode::configure_covariances_()
+{
+  if (!sync_sensor_quaternion_) {
+    imu_msg_.orientation_covariance[0] = -1.0;
+  }
+  if (!sync_sensor_gyro_) {
+    imu_msg_.angular_velocity_covariance[0] = -1.0;
+  }
+  if (!sync_sensor_accel_) {
+    imu_msg_.linear_acceleration_covariance[0] = -1.0;
+  }
 }
 
-void IAHRSDriverNode::sync_data_callback_(void) {
-  iahrs_driver_sync_data_t data_buff;
-  bool ret;
+void IAHRSDriverNode::publish_static_tf_()
+{
+  tf_broadcaster_ =
+    std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
-  ret = imu_driver_.get()->fetch_sync_data(data_buff);
-  if (ret == false) {
+  geometry_msgs::msg::TransformStamped transform;
+  transform.header.stamp = get_clock()->now();
+  transform.header.frame_id = parent_frame_id_;
+  transform.child_frame_id = frame_id_;
+  transform.transform.rotation.w = 1.0;
+  tf_broadcaster_->sendTransform(transform);
+}
+
+void IAHRSDriverNode::sync_data_callback_()
+{
+  iahrs_driver_sync_data_t data{};
+  if (!imu_driver_->fetch_sync_data(data, 1)) {
     return;
   }
 
-  for (iahrs_driver_sync_flag_t i = static_cast<iahrs_driver_sync_flag_t>(IAHRS_DRIVER_SYNC_FLAG_NONE + 1);
-       i < IAHRS_DRIVER_SYNC_FLAG_MAX;
-       i = static_cast<iahrs_driver_sync_flag_t>(i << 1)) {
-
-    if ((sync_flag_ & i) != i) {
-      continue;
-    }
-
-    switch (i) {
-    case IAHRS_DRIVER_SYNC_FLAG_SENSOR_ACCEL:
-    case IAHRS_DRIVER_SYNC_FLAG_SENSOR_GYRO:
-    case IAHRS_DRIVER_SYNC_FLAG_QUATERNION:
-      imu_msg_.linear_acceleration.x = data_buff.accel.x * 9.80665;
-      imu_msg_.linear_acceleration.y = data_buff.accel.y * 9.80665;
-      imu_msg_.linear_acceleration.z = data_buff.accel.z * 9.80665;
-
-      imu_msg_.angular_velocity.x = data_buff.gyro.x * (M_PI / 180.0);
-      imu_msg_.angular_velocity.y = data_buff.gyro.y * (M_PI / 180.0);
-      imu_msg_.angular_velocity.z = data_buff.gyro.z * (M_PI / 180.0);
-
-      imu_msg_.orientation.x = data_buff.quaternion_angle.x;
-      imu_msg_.orientation.y = data_buff.quaternion_angle.y;
-      imu_msg_.orientation.z = data_buff.quaternion_angle.z;
-      imu_msg_.orientation.w = data_buff.quaternion_angle.w;
-
-      imu_msg_.header.stamp = get_clock().get()->now();
-      imu_publisher_.get()->publish(imu_msg_);
-      break;
-
-    case IAHRS_DRIVER_SYNC_FLAG_SENSOR_MAG:
-      mag_msg_.magnetic_field.x = data_buff.mag.x;
-      mag_msg_.magnetic_field.y = data_buff.mag.y;
-      mag_msg_.magnetic_field.z = data_buff.mag.z;
-
-      mag_msg_.header.stamp = get_clock().get()->now();
-      mag_publisher_.get()->publish(mag_msg_);
-      break;
-
-    default:
-      break;
-    }
+  if (sync_sensor_quaternion_ &&
+    !normalize_quaternion(data.quaternion_angle))
+  {
+    RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Discarding IMU packet with an invalid quaternion");
+    return;
   }
-}
 
-void IAHRSDriverNode::tf_publish_callback_(void) {
-  geometry_msgs::msg::TransformStamped transformStamped;
+  const auto stamp = get_clock()->now();
+  if (is_imu_enabled()) {
+    if (sync_sensor_accel_) {
+      imu_msg_.linear_acceleration.x =
+        data.accel.x * STANDARD_GRAVITY;
+      imu_msg_.linear_acceleration.y =
+        data.accel.y * STANDARD_GRAVITY;
+      imu_msg_.linear_acceleration.z =
+        data.accel.z * STANDARD_GRAVITY;
+    }
+    if (sync_sensor_gyro_) {
+      imu_msg_.angular_velocity.x =
+        data.gyro.x * DEGREES_TO_RADIANS;
+      imu_msg_.angular_velocity.y =
+        data.gyro.y * DEGREES_TO_RADIANS;
+      imu_msg_.angular_velocity.z =
+        data.gyro.z * DEGREES_TO_RADIANS;
+    }
+    if (sync_sensor_quaternion_) {
+      imu_msg_.orientation.x = data.quaternion_angle.x;
+      imu_msg_.orientation.y = data.quaternion_angle.y;
+      imu_msg_.orientation.z = data.quaternion_angle.z;
+      imu_msg_.orientation.w = data.quaternion_angle.w;
+    }
+    imu_msg_.header.stamp = stamp;
+    imu_publisher_->publish(imu_msg_);
+  }
 
-  transformStamped.header.stamp = this->get_clock().get()->now();
-  transformStamped.header.frame_id = "base_link";
-  transformStamped.child_frame_id = frame_id_;
-
-  transformStamped.transform.translation.x = 0.0;
-  transformStamped.transform.translation.y = 0.0;
-  transformStamped.transform.translation.z = 0.0;
-  transformStamped.transform.rotation.x = 0.0;
-  transformStamped.transform.rotation.y = 0.0;
-  transformStamped.transform.rotation.z = 0.0;
-  transformStamped.transform.rotation.w = 1.0;
-
-  tf_broadcaster_->sendTransform(transformStamped);
-}
-
-void IAHRSDriverNode::stop_node_(const char *msg) {
-  RCLCPP_ERROR(this->get_logger(), "Node has been stopped!");
-  RCLCPP_ERROR(this->get_logger(), msg);
-  throw msg;
+  if (sync_sensor_mag_) {
+    mag_msg_.magnetic_field.x = data.mag.x * MICROTESLA_TO_TESLA;
+    mag_msg_.magnetic_field.y = data.mag.y * MICROTESLA_TO_TESLA;
+    mag_msg_.magnetic_field.z = data.mag.z * MICROTESLA_TO_TESLA;
+    mag_msg_.header.stamp = stamp;
+    mag_publisher_->publish(mag_msg_);
+  }
 }
 
 void IAHRSDriverNode::restart_service_callback_(
-    const std::shared_ptr<iahrs_ros2_driver_msgs::srv::Restart::Request> request,
-    std::shared_ptr<iahrs_ros2_driver_msgs::srv::Restart::Response> response) {
-  RCL_UNUSED(request);
+  const std::shared_ptr<
+    iahrs_ros2_driver_msgs::srv::Restart::Request> request,
+  std::shared_ptr<
+    iahrs_ros2_driver_msgs::srv::Restart::Response> response)
+{
+  (void)request;
 
-  bool ret = imu_driver_.get()->reboot();
-  if (ret) {
-    imu_driver_.get()->set_option(enable_filter_);
+  bool success = imu_driver_->reboot();
+  if (success) {
+    success = imu_driver_->set_option(enable_filter_);
   }
-  if (is_sync_enabled_in_param()) {
-    enable_sync_(get_sync_flag_from_param());
-    sync_flag_ = imu_driver_.get()->get_sync_flag();
+  if (success && is_sync_enabled_in_param()) {
+    try {
+      configure_sync_();
+    } catch (const std::exception & error) {
+      RCLCPP_ERROR(get_logger(), "%s", error.what());
+      success = false;
+    }
   }
-  if (ret == true) {
-    RCLCPP_INFO(this->get_logger(), "IMU Restarted.");
+
+  response->result = success;
+  if (success) {
+    RCLCPP_INFO(get_logger(), "IMU restarted");
   } else {
-    RCLCPP_WARN(this->get_logger(), "IMU Restart failed");
+    RCLCPP_WARN(get_logger(), "IMU restart failed");
   }
-  response.get()->result = ret;
 }
 
 void IAHRSDriverNode::reset_orientation_service_callback_(
-    const std::shared_ptr<iahrs_ros2_driver_msgs::srv::ResetOrientation::Request> request,
-    std::shared_ptr<iahrs_ros2_driver_msgs::srv::ResetOrientation::Response> response) {
-  RCL_UNUSED(request);
+  const std::shared_ptr<
+    iahrs_ros2_driver_msgs::srv::ResetOrientation::Request> request,
+  std::shared_ptr<
+    iahrs_ros2_driver_msgs::srv::ResetOrientation::Response> response)
+{
+  (void)request;
 
-  bool ret = imu_driver_.get()->reset_euler_angle();
-  response.get()->result = ret;
-
-  if (ret == true) {
-    RCLCPP_INFO(this->get_logger(), "IMU Restarted.");
+  response->result = imu_driver_->reset_euler_angle();
+  if (response->result) {
+    RCLCPP_INFO(get_logger(), "IMU heading reset");
   } else {
-    RCLCPP_WARN(this->get_logger(), "Heading reset failed.");
+    RCLCPP_WARN(get_logger(), "IMU heading reset failed");
   }
 }
 
-int main(int argc, char *argv[]) {
-  // ROS2 초기화
+int main(int argc, char *argv[])
+{
   rclcpp::init(argc, argv);
-
-  std::shared_ptr<IAHRSDriverNode> node;
-
-  // 노드 실행
+  int exit_code = 0;
   try {
-    node = std::make_shared<IAHRSDriverNode>("iahrs_driver_node");
-    rclcpp::spin(node);
-  } catch (const char *e) {
-    ;
+    rclcpp::spin(
+        std::make_shared<IAHRSDriverNode>("iahrs_driver_node"));
+  } catch (const std::exception & error) {
+    RCLCPP_FATAL(
+        rclcpp::get_logger("iahrs_driver_node"), "%s", error.what());
+    exit_code = 1;
   }
-
-  // ROS2 종료
   rclcpp::shutdown();
-  return 0;
+  return exit_code;
 }

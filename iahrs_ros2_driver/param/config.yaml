@@ -4,6 +4,7 @@
                          # iAHRS가 연결된 블럭디바이스 주소를 입력.
                          # Udev Rule 설정을 통해 iAHRS 주소를 특정 주소로 고정시키는것을 권장함.
     frame_id: "imu_link" # 센서 데이터 프레임
+    parent_frame_id: "base_link" # publish_tf의 부모 프레임
     publish_tf: true     # tf publish 여부
                          # base_link -> imu_link로 (0, 0, 0, 0, 0, 0, 1) tf publish
 

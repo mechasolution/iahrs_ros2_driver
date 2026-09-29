@@ -143,7 +143,10 @@ bool IAHRSDriver::reboot()
       return false;
     }
 
-    if (index == 1 && response != std::string("iAHRS") + END_DATA) {
+    if (index == 1 &&
+      response != std::string("iAHRS") + END_DATA &&
+      response != std::string("iAHRSv1") + END_DATA)
+    {
       return false;
     }
 
